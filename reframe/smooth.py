@@ -39,19 +39,19 @@ _MEDIAN_WINDOW = 5          # odd number; must be >= 3
 # Shot mode variance thresholds (expressed as fraction of ref diagonal)
 # Variance below STATIONARY → lock crop
 # Variance below PAN → slow EMA follow
-# Above PAN → TRACK (capped velocity)
-_VARIANCE_STATIONARY_FRAC = 0.025   # ~55px at 1080p, ~110px at 4K — very sticky
-_VARIANCE_PAN_FRAC        = 0.080   # ~177px at 1080p, ~354px at 4K — rare to hit
+# Above PAN → TRACK (capped velocity) — almost never reached in practice
+_VARIANCE_STATIONARY_FRAC = 0.020   # ~44px at 1080p, ~88px at 4K — very sticky
+_VARIANCE_PAN_FRAC        = 0.120   # ~265px at 1080p, ~530px at 4K — almost never hit
 
 # STATIONARY breach: only unlock if centroid drifts this far (fraction of ref diagonal)
 _BREACH_FRAC = 0.07              # ~155px at 1080p, ~309px at 4K
 
 # EMA alpha for PAN mode — very slow to avoid chasing detection noise
-_EMA_ALPHA = 0.015               # very conservative
+_EMA_ALPHA = 0.010               # very conservative — near-frozen
 
 # Maximum crop center jump per frame (in reference diagonal units)
 # This is the KEY anti-spazzing mechanism
-_MAX_VELOCITY_FRAC = 0.018        # ~40px at 1080p, ~80px at 4K per frame
+_MAX_VELOCITY_FRAC = 0.012        # ~27px at 1080p, ~53px at 4K per frame — slower deliberate pans
 
 # Kalman measurement noise — high = very damped, low = responsive
 _KALMAN_MEASUREMENT_NOISE = 25.0  # was 10 — much more smoothing

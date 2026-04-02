@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 CLASS_WEIGHTS: dict = {
     "person":       1.0,
-    "face":         0.7,    # lowered from 1.4 — face jitter at 4K causes spazzing
+    "face":         0.5,    # lowered from 0.7 — face jitter at 4K still too spazzy
     "car":          0.7,
     "motorcycle":   0.7,
     "bicycle":      0.6,
@@ -35,7 +35,7 @@ CLASS_WEIGHTS: dict = {
 YOLO_CONF_THRESHOLD = 0.40    # raised from 0.35 — fewer false detections
 
 # Minimum YOLO person confidence required to trigger InsightFace
-INSIGHTFACE_GATE_THRESHOLD = 0.60   # raised from 0.4 — only confident person → face
+INSIGHTFACE_GATE_THRESHOLD = 0.70   # raised from 0.60 — stricter face gating, fewer false triggers
 
 # Gaussian blob sigma as a fraction of detection box diagonal
 GAUSSIAN_SIGMA_FACTOR = 0.25
