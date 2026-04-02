@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reframe-pipeline"
+version = "0.1.0"
+description = "Saliency-aware video reframing pipeline — intelligently crop wide video to any aspect ratio by tracking faces and objects"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Zamba Villa", email = "zambav@gmail.com"}
+]
+keywords = [
+    "video", "reframing", "crop", "saliency", "yolo",
+    "autoflip", "9:16", "vertical-video", "face-detection",
+    "tracking", "ffmpeg", "blender", "pipeline"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Multimedia :: Video :: Conversion",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "ultralytics",
+    "insightface",
+    "onnxruntime",
+    "scenedetect[opencv]",
+    "numpy",
+    "ffmpeg-python",
+    "filterpy",
+    "opencv-python",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+reframe = "reframe.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Zambav/reframe"
+Documentation = "https://github.com/Zambav/reframe#readme"
+Repository = "https://github.com/Zambav/reframe"
+Issues = "https://github.com/Zambav/reframe/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reframe*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]

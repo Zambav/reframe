@@ -1,0 +1,8 @@
+ultralytics
+insightface
+onnxruntime
+scenedetect[opencv]
+numpy
+ffmpeg-python
+filterpy
+opencv-python
