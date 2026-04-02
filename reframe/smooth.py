@@ -1,14 +1,14 @@
 """
 smooth.py — Camera path smoothing: Kalman filter, EMA, and shot mode classification.
 
-Shot modes (AutoFlip-inspired):
-  STATIONARY  — subject not moving; lock crop, only move on hard threshold breach
-  PAN         — slow lateral movement; EMA with low alpha, smooth follow
-  TRACK       — active subject movement; Kalman filter, responsive but filtered
+Core philosophy: be LAZY. The crop should only move when the evidence is overwhelming.
+Detection noise (especially faces at 4K) causes jitter — we kill that at the source
+with a median pre-filter, then apply very conservative smoothing.
 
-All pixel-based thresholds are SCALED to the source frame diagonal.
-Reference: 1920x1080 diagonal = 2209 px. All thresholds are expressed as
-fractions of this diagonal, then multiplied by the actual frame diagonal.
+Shot modes (AutoFlip-inspired):
+  STATIONARY  — default. Lock crop. Only move on sustained, large drift.
+  PAN         — only when centroid is moving consistently in one direction.
+  TRACK       — only for genuinely fast subject motion. Capped velocity.
 """
 
 import numpy as np
@@ -26,36 +26,38 @@ log = logging.getLogger(__name__)
 _REF_DIAGONAL = float(np.sqrt(1920**2 + 1080**2))   # 2209.07 px
 
 
-def _scale(val: float, diagonal: float) -> float:
-    """Scale a threshold from reference diagonal to actual frame diagonal."""
-    return val * (diagonal / _REF_DIAGONAL)
+# ---------------------------------------------------------------------------
+# Median pre-filter window — kills detection spike noise before smoothing
+# ---------------------------------------------------------------------------
+_MEDIAN_WINDOW = 5          # odd number; must be >= 3
 
 
 # ---------------------------------------------------------------------------
-# Thresholds expressed as FRACTIONS of reference diagonal
-# Tune these. The actual pixel threshold = fraction × (frame_diagonal / 2209)
+# Thresholds as FRACTIONS of reference diagonal
 # ---------------------------------------------------------------------------
 
-# Shot mode classification (based on centroid variance — scale-aware)
-WINDOW_FRAMES = 20
+# Shot mode variance thresholds (expressed as fraction of ref diagonal)
+# Variance below STATIONARY → lock crop
+# Variance below PAN → slow EMA follow
+# Above PAN → TRACK (capped velocity)
+_VARIANCE_STATIONARY_FRAC = 0.025   # ~55px at 1080p, ~110px at 4K — very sticky
+_VARIANCE_PAN_FRAC        = 0.080   # ~177px at 1080p, ~354px at 4K — rare to hit
 
-# Variance below this (normalized to ref diagonal²) → STATIONARY
-# 200/2209 ≈ 9% of diagonal — lock crop aggressively
-_STATIONARY_VARIANCE_FRAC  = 0.009          # × ref_diagonal² → threshold in px²
-_PAN_VARIANCE_FRAC          = 0.040          # × ref_diagonal² → threshold in px²
+# STATIONARY breach: only unlock if centroid drifts this far (fraction of ref diagonal)
+_BREACH_FRAC = 0.07              # ~155px at 1080p, ~309px at 4K
 
-# STATIONARY mode: only move crop if centroid drifts this far from lock point
-# Expressed as fraction of ref diagonal
-_STATIONARY_BREACH_FRAC     = 0.045          # ~100px at 1080p, ~200px at 4K
+# EMA alpha for PAN mode — very slow to avoid chasing detection noise
+_EMA_ALPHA = 0.015               # very conservative
 
-# EMA alpha for PAN mode (0.0 = frozen, 1.0 = instant snap)
-_EMA_ALPHA_PAN_RAW          = 0.025          # very slow — don't chase small movements
+# Maximum crop center jump per frame (in reference diagonal units)
+# This is the KEY anti-spazzing mechanism
+_MAX_VELOCITY_FRAC = 0.018        # ~40px at 1080p, ~80px at 4K per frame
 
-# Kalman measurement noise — increase to dampen responsiveness
-_KALMAN_MEASUREMENT_NOISE   = 20.0          # was 10 — more smoothing
+# Kalman measurement noise — high = very damped, low = responsive
+_KALMAN_MEASUREMENT_NOISE = 25.0  # was 10 — much more smoothing
 
-# Innovation threshold fraction (reset trigger)
-_INNOVATION_FRAC            = 0.18           # ~397px at 1080p, ~795px at 4K
+# Innovation threshold fraction for soft cut detection
+_INNOVATION_FRAC = 0.28          # ~618px at 1080p, ~1237px at 4K — very hard to trigger
 
 
 # ---------------------------------------------------------------------------
@@ -69,14 +71,11 @@ class ShotMode(Enum):
 
 
 # ---------------------------------------------------------------------------
-# Simple 1D Kalman filter
+# 1D Kalman filter
 # ---------------------------------------------------------------------------
 
 class Kalman1D:
-    """
-    1D constant-velocity Kalman filter.
-    State: [position, velocity]
-    """
+    """1D constant-velocity Kalman filter — heavily damped for stability."""
 
     def __init__(self, process_noise: float, measurement_noise: float):
         self.Q = process_noise
@@ -115,14 +114,19 @@ class Kalman1D:
 
 
 # ---------------------------------------------------------------------------
-# 2D smoother: wraps two Kalman1D (x and y)
+# CropSmoother — resolution-aware, with median pre-filter + velocity clamping
 # ---------------------------------------------------------------------------
 
 class CropSmoother:
     """
-    Full 2D crop center smoother with shot mode classification.
+    Full 2D crop center smoother.
 
-    All thresholds are resolution-aware: scaled by frame diagonal.
+    Key anti-spazzing design:
+    1. Median pre-filter on raw centroid — kills detection spike noise
+    2. Very conservative shot mode thresholds — stay in STATIONARY almost always
+    3. Velocity clamping — crop center can't jump more than MAX_VELOCITY per frame
+    4. High Kalman measurement noise — heavily damped when TRACK is unavoidable
+
     Usage:
         smoother = CropSmoother(src_w=3840, src_h=2160)
         smoother.reset(cx, cy)
@@ -142,25 +146,31 @@ class CropSmoother:
         self._scale = self._diagonal / _REF_DIAGONAL
 
         # Pre-compute scaled thresholds
-        self._stationary_thresh = _STATIONARY_VARIANCE_FRAC * _REF_DIAGONAL**2
-        self._pan_thresh       = _PAN_VARIANCE_FRAC * _REF_DIAGONAL**2
-        self._breach_thresh    = _STATIONARY_BREACH_FRAC * _REF_DIAGONAL * self._scale
+        self._var_stationary = (_VARIANCE_STATIONARY_FRAC * _REF_DIAGONAL) ** 2
+        self._var_pan        = (_VARIANCE_PAN_FRAC * _REF_DIAGONAL) ** 2
+        self._breach_thresh  = _BREACH_FRAC * _REF_DIAGONAL * self._scale
+        self._max_velocity   = _MAX_VELOCITY_FRAC * _REF_DIAGONAL * self._scale
         self._innovation_thresh = _INNOVATION_FRAC * _REF_DIAGONAL * self._scale
-        self._ema_alpha = _EMA_ALPHA_PAN_RAW
+        self._ema_alpha = _EMA_ALPHA
 
         log.debug(
             "CropSmoother (%.0fx%.0f, diagonal=%.0f, scale=%.2f): "
-            "stationary_var=%.0f, pan_var=%.0f, breach=%.1f, innovation=%.1f",
+            "stationary_var=%.0f, pan_var=%.0f, breach=%.1f, "
+            "max_vel=%.1f, innovation=%.1f",
             src_w, src_h, self._diagonal, self._scale,
-            self._stationary_thresh, self._pan_thresh,
-            self._breach_thresh, self._innovation_thresh
+            self._var_stationary, self._var_pan,
+            self._breach_thresh, self._max_velocity, self._innovation_thresh
         )
+
+        # Median pre-filter state
+        self._median_x: deque = deque(maxlen=_MEDIAN_WINDOW)
+        self._median_y: deque = deque(maxlen=_MEDIAN_WINDOW)
 
         self.kx = Kalman1D(process_noise, measurement_noise)
         self.ky = Kalman1D(process_noise, measurement_noise)
 
-        self._history_x: deque = deque(maxlen=WINDOW_FRAMES)
-        self._history_y: deque = deque(maxlen=WINDOW_FRAMES)
+        self._history_x: deque = deque(maxlen=20)
+        self._history_y: deque = deque(maxlen=20)
 
         self._ema_x: Optional[float] = None
         self._ema_y: Optional[float] = None
@@ -169,11 +179,11 @@ class CropSmoother:
         self._last_x: Optional[float] = None
         self._last_y: Optional[float] = None
 
-        self._mode: ShotMode = ShotMode.TRACK
+        self._mode: ShotMode = ShotMode.STATIONARY
         self._last_innovation: float = 0.0
 
     # -----------------------------------------------------------------------
-    # Accessor for cut detector
+    # Accessor for CutDetector
     # -----------------------------------------------------------------------
 
     @property
@@ -187,6 +197,8 @@ class CropSmoother:
     def reset(self, cx: Optional[float] = None, cy: Optional[float] = None):
         self._history_x.clear()
         self._history_y.clear()
+        self._median_x.clear()
+        self._median_y.clear()
         self._ema_x = cx
         self._ema_y = cy
         self._lock_x = cx
@@ -195,8 +207,47 @@ class CropSmoother:
             self.kx.reset(cx)
         if cy is not None:
             self.ky.reset(cy)
-        self._mode = ShotMode.TRACK
+        self._mode = ShotMode.STATIONARY
         log.debug("Smoother reset at (%.1f, %.1f)", cx or 0, cy or 0)
+
+    # -----------------------------------------------------------------------
+    # Median pre-filter
+    # -----------------------------------------------------------------------
+
+    def _median_filter(self, cx: float, cy: float) -> Tuple[float, float]:
+        """Rolling median filter — kills detection spike noise."""
+        self._median_x.append(cx)
+        self._median_y.append(cy)
+        if len(self._median_x) < _MEDIAN_WINDOW:
+            return cx, cy
+        return float(np.median(self._median_x)), float(np.median(self._median_y))
+
+    # -----------------------------------------------------------------------
+    # Velocity clamp
+    # -----------------------------------------------------------------------
+
+    def _clamp_velocity(
+        self,
+        raw_x: float,
+        raw_y: float,
+        prev_x: Optional[float],
+        prev_y: Optional[float],
+    ) -> Tuple[float, float]:
+        """Prevent the crop center from jumping more than MAX_VELOCITY per frame."""
+        if prev_x is None or prev_y is None:
+            return raw_x, raw_y
+        dx = raw_x - prev_x
+        dy = raw_y - prev_y
+        dist = np.sqrt(dx**2 + dy**2)
+        if dist <= self._max_velocity:
+            return raw_x, raw_y
+        # Scale down to max velocity
+        scale = self._max_velocity / dist
+        new_x = prev_x + dx * scale
+        new_y = prev_y + dy * scale
+        log.debug("Velocity clamp: (%.1f,%.1f) → (%.1f,%.1f) [max=%.1f]",
+                  raw_x, raw_y, new_x, new_y, self._max_velocity)
+        return new_x, new_y
 
     # -----------------------------------------------------------------------
     # Shot mode classification
@@ -204,11 +255,11 @@ class CropSmoother:
 
     def _classify_mode(self) -> ShotMode:
         if len(self._history_x) < 5:
-            return ShotMode.TRACK
-        var = np.var(list(self._history_x)) + np.var(list(self._history_y))
-        if var < self._stationary_thresh:
             return ShotMode.STATIONARY
-        elif var < self._pan_thresh:
+        var = np.var(list(self._history_x)) + np.var(list(self._history_y))
+        if var < self._var_stationary:
+            return ShotMode.STATIONARY
+        elif var < self._var_pan:
             return ShotMode.PAN
         else:
             return ShotMode.TRACK
@@ -228,16 +279,24 @@ class CropSmoother:
             log.debug("No detections — holding last position")
             return self._last_x, self._last_y
 
-        self._history_x.append(raw_cx)
-        self._history_y.append(raw_cy)
+        # Step 1: Median filter on raw detection
+        cx, cy = self._median_filter(raw_cx, raw_cy)
+
+        # Step 2: Velocity clamp
+        cx, cy = self._clamp_velocity(cx, cy, self._last_x, self._last_y)
+
+        # Step 3: Update history for mode classification
+        self._history_x.append(cx)
+        self._history_y.append(cy)
+
         self._mode = self._classify_mode()
 
         if self._mode == ShotMode.STATIONARY:
-            smooth_cx, smooth_cy = self._apply_stationary(raw_cx, raw_cy)
+            smooth_cx, smooth_cy = self._apply_stationary(cx, cy)
         elif self._mode == ShotMode.PAN:
-            smooth_cx, smooth_cy = self._apply_ema(raw_cx, raw_cy)
+            smooth_cx, smooth_cy = self._apply_ema(cx, cy)
         else:
-            smooth_cx, smooth_cy, innovation = self._apply_kalman(raw_cx, raw_cy)
+            smooth_cx, smooth_cy, innovation = self._apply_kalman(cx, cy)
             self._last_innovation = max(innovation, self._last_innovation * 0.9)
 
         self._last_x = smooth_cx
@@ -248,32 +307,36 @@ class CropSmoother:
     # Per-mode implementations
     # -----------------------------------------------------------------------
 
-    def _apply_stationary(self, raw_cx: float, raw_cy: float) -> Tuple[float, float]:
+    def _apply_stationary(self, cx: float, cy: float) -> Tuple[float, float]:
+        """Lock crop. Only unlock on sustained large drift."""
         if self._lock_x is None:
-            self._lock_x = raw_cx
-            self._lock_y = raw_cy
-            return raw_cx, raw_cy
+            self._lock_x = cx
+            self._lock_y = cy
+            return cx, cy
 
-        dist = np.sqrt((raw_cx - self._lock_x)**2 + (raw_cy - self._lock_y)**2)
+        dist = np.sqrt((cx - self._lock_x)**2 + (cy - self._lock_y)**2)
         if dist > self._breach_thresh:
-            log.debug("STATIONARY breach (%.1fpx > %.1fpx) — updating lock", dist, self._breach_thresh)
-            self._lock_x = raw_cx
-            self._lock_y = raw_cy
+            log.debug("STATIONARY breach (%.1fpx > %.1fpx) — updating lock",
+                      dist, self._breach_thresh)
+            self._lock_x = cx
+            self._lock_y = cy
         return self._lock_x, self._lock_y
 
-    def _apply_ema(self, raw_cx: float, raw_cy: float) -> Tuple[float, float]:
+    def _apply_ema(self, cx: float, cy: float) -> Tuple[float, float]:
+        """Very slow EMA — don't chase small movements."""
         if self._ema_x is None:
-            self._ema_x = raw_cx
-            self._ema_y = raw_cy
+            self._ema_x = cx
+            self._ema_y = cy
         else:
             a = self._ema_alpha
-            self._ema_x = a * raw_cx + (1 - a) * self._ema_x
-            self._ema_y = a * raw_cy + (1 - a) * self._ema_y
+            self._ema_x = a * cx + (1 - a) * self._ema_x
+            self._ema_y = a * cy + (1 - a) * self._ema_y
         return self._ema_x, self._ema_y
 
-    def _apply_kalman(self, raw_cx: float, raw_cy: float) -> Tuple[float, float, float]:
-        sx, ix = self.kx.update(raw_cx)
-        sy, iy = self.ky.update(raw_cy)
+    def _apply_kalman(self, cx: float, cy: float) -> Tuple[float, float, float]:
+        """Kalman — capped by velocity clamp upstream."""
+        sx, ix = self.kx.update(cx)
+        sy, iy = self.ky.update(cy)
         innovation = max(ix, iy)
         return sx, sy, innovation
 
