@@ -18,7 +18,6 @@ from .detect import SaliencyDetector, CLASS_WEIGHTS
 from .smooth import CropSmoother
 from .crop import compute_crop_window, apply_crop, OcclusionHandler, detect_split_subjects, scene_centroid
 from .scenes import detect_cuts, CutDetector
-from .smooth import INNOVATION_RESET_THRESH
 
 
 logging.basicConfig(
@@ -153,9 +152,9 @@ def main():
         use_insightface=not args.no_insightface,
         device=args.device,
     )
-    smoother  = CropSmoother()
+    smoother  = CropSmoother(src_w=src_w, src_h=src_h)
     occlusion = OcclusionHandler(src_w, src_h)
-    cut_det   = CutDetector(cuts, innovation_thresh=INNOVATION_RESET_THRESH)
+    cut_det   = CutDetector(cuts, innovation_thresh=smoother.innovation_thresh)
 
     process_fn = make_process_fn(detector, smoother, occlusion, cut_det)
 

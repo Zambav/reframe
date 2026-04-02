@@ -22,10 +22,13 @@ log = logging.getLogger(__name__)
 # Set conservatively — better to miss a soft cut than false-trigger on action
 # ---------------------------------------------------------------------------
 
-SCENEDETECT_THRESHOLD = 30.0    # ContentDetector threshold (lower = more sensitive)
+# ContentDetector threshold — higher = only true hard cuts detected
+# 30 was too sensitive (false cuts on motion-heavy frames)
+# 50-60 is a better range for well-produced content
+SCENEDETECT_THRESHOLD = 55.0
 
 # Minimum frames between two detected cuts (avoid rapid re-triggering)
-MIN_CUT_INTERVAL_FRAMES = 10
+MIN_CUT_INTERVAL_FRAMES = 20
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +80,7 @@ class CutDetector:
     def __init__(
         self,
         precomputed_cuts: Set[int],
-        innovation_thresh: float = 120.0,
+        innovation_thresh: float = 0.0,  # 0 = disabled; pass real value from CropSmoother
     ):
         self._cuts = precomputed_cuts
         self._innovation_thresh = innovation_thresh
