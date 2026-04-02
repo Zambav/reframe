@@ -22,21 +22,22 @@ log = logging.getLogger(__name__)
 
 # Shot mode classification (based on centroid variance over rolling window)
 WINDOW_FRAMES         = 20       # rolling window length for mode classification
-STATIONARY_THRESH     = 50.0     # variance below this → STATIONARY
-PAN_THRESH            = 400.0    # variance below this (and > STATIONARY) → PAN
+STATIONARY_THRESH     = 200.0    # variance below this → STATIONARY (raised from 50 — lock more)
+PAN_THRESH            = 2000.0   # variance below this (and > STATIONARY) → PAN (raised from 400)
                                  # above PAN_THRESH → TRACK
 
 # STATIONARY mode: only move crop if centroid drifts this many pixels from lock point
-STATIONARY_BREACH_PX  = 80
+STATIONARY_BREACH_PX  = 100      # raised from 80 — less jitter on lock
 
 # EMA alpha for PAN mode (0.0 = frozen, 1.0 = instant snap)
-EMA_ALPHA_PAN         = 0.05
+EMA_ALPHA_PAN         = 0.03     # lowered from 0.05 — slower, smoother follow
 
 # Kalman process noise for TRACK mode (higher = more responsive, more jittery)
-KALMAN_PROCESS_NOISE  = 0.05
+KALMAN_PROCESS_NOISE  = 0.03     # lowered from 0.05 — less jitter when in TRACK mode
 
 # Kalman innovation threshold for scene cut fallback (see scenes.py)
-INNOVATION_RESET_THRESH = 120.0  # pixels
+# Only reset smoother on LARGE sudden jumps — not normal tracking noise
+INNOVATION_RESET_THRESH = 500.0  # raised from 120 — was resetting every 10 frames
 
 
 # ---------------------------------------------------------------------------

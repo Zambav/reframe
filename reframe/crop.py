@@ -33,7 +33,7 @@ OCCLUSION_DECAY_ALPHA = 0.02       # slow drift back to center
 
 # If two clusters of salient pixels are this far apart (as fraction of frame width),
 # treat as "opposite quadrants" → fall back to scene centroid
-SPLIT_SUBJECT_THRESH = 0.45
+SPLIT_SUBJECT_THRESH = 0.70    # raised from 0.45 — only fire for genuinely opposite subjects
 
 
 # ---------------------------------------------------------------------------
